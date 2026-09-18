@@ -1,0 +1,16 @@
+name: Windchill
+version: '${version}'
+
+main: com.tricrotism.windchill.Windchill
+api-version: '1.21'
+load: POSTWORLD
+folia-supported: true
+
+authors: [ tricrotism ]
+website: https://tricrotism.com
+description: Reports why the JIT could not optimise your plugins, and orchestrates an AOT cache.
+
+permissions:
+  windchill.use:
+    description: Run Windchill captures, read reports and manage the AOT cache.
+    default: op

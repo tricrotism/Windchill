@@ -1,0 +1,142 @@
+# Windchill
+#
+# Every key below is required. Windchill copies new keys from the version bundled in the jar on each
+# startup and keeps your values, so this file stays in step with the release without losing settings.
+# Comments always come from the bundled template, so anything you write here will not survive an
+# upgrade.
+#
+# Before tuning anything here, know when to capture. A window only sees compilations, inlining
+# decisions and deoptimisations that happen inside it, and code compiled before the capture opened is
+# silent afterward. Capture in the first minute or two after a restart to analyze inlining; capture
+# any time for dispatch, interpretation, deoptimisation, recompilation and code cache findings.
+
+capture:
+  # Default length of a capture window, in seconds, when /windchill capture or /windchill time is
+  # given no number. Shorter windows sample too little to rank anything; longer ones dilute a
+  # transient problem.
+  window-seconds: 120
+
+  # Hard ceiling on a window regardless of what the command asks for. Every window auto-stops at
+  # this point even if nobody closes it, so a forgotten capture cannot run forever.
+  max-window-seconds: 600
+
+  # Execution sampling interval, in milliseconds. This is the hotness signal every rule ranks by.
+  # 10ms is roughly 100 samples a second per running thread. Raise it on a busy box to cut overhead,
+  # at the cost of needing a longer window to say anything confidently.
+  sample-period-ms: 10
+
+  # Whether /windchill capture records inlining decisions when no option is given.
+  #
+  # Inline detail is what turns "this method is slow" into "the JIT refused to inline it because the
+  # callee is over the size limit". It is also the highest-volume event the JVM emits: one per
+  # inlining decision per compilation. Leave it off by default and ask for it explicitly with
+  # /windchill capture <seconds> --inline on a short window.
+  inline-detail: false
+
+  # A capture taken automatically after every restart.
+  #
+  # This is the only window in which the inlining analysis can see anything. A method is compiled
+  # once and then goes quiet, so a plugin that has been running for an hour produces no inlining
+  # evidence no matter how hot it is. Startup is when compilation happens, and nobody is at the
+  # console to catch it.
+  #
+  # It also makes the AOT method-profile benefit measurable. Taken at the same point after boot every
+  # time, the number of compilations needed is comparable between boots that replayed profiles and
+  # boots that did not, which is the JIT half of what an AOT cache buys you.
+  #
+  # The window auto-stops like any other, and the report is written to reports/ rather than announced.
+  on-startup:
+    enabled: true
+
+    # Seconds after Windchill enables before the window opens. The default lets the server finish
+    # coming up, so the capture covers early gameplay rather than world loading.
+    delay-seconds: 30
+
+    # How long the startup window runs. Long enough to catch the compilation burst, short enough that
+    # inline detail stays cheap.
+    window-seconds: 90
+
+    # Inline detail during the startup capture. On by default because this is the one window where it
+    # can produce JIT-1 findings at all; turning it off makes the startup capture much cheaper and
+    # much less useful.
+    inline-detail: true
+
+limits:
+  # Caps on what one window may retain. These bound Windchill's own memory: past a cap, further
+  # distinct entries are counted and discarded rather than stored, and the report says so.
+  max-methods: 20000
+  max-inline-failures: 20000
+  max-deopt-groups: 5000
+
+  # How deep into each sampled stack to attribute. Deeper finds callers further from the hot frame
+  # and costs proportionally more per sample.
+  max-frame-depth: 64
+
+thresholds:
+  # A finding needs the method to be genuinely hot. These are fractions of the window's samples:
+  # 0.005 is half a percent. Below these, a compiler complaint is noise, because a method the JIT
+  # dislikes but nothing calls costs nothing.
+  #
+  # min-self-share is time in the method itself. min-stack-share is time anywhere beneath it.
+  min-self-share: 0.005
+  min-stack-share: 0.01
+
+  # Deoptimisations per minute below which a method is not reported as deoptimising repeatedly.
+  min-deopts-per-minute: 6
+
+  # Compilations of one method within one window before it counts as churn. Tiered compilation
+  # legitimately compiles a method a few times on its way up.
+  recompile-churn-count: 8
+
+  # How full the code cache has to get before Windchill warns. Filling it disables the JIT for the
+  # rest of the server's life, so the warning wants to arrive early.
+  code-cache-warn-fraction: 0.8
+
+  # Compiler queue depth that counts as a backlog. Anything queued runs interpreted until compiled.
+  compiler-queue-warn-length: 200
+
+  # Most findings any single rule may contribute, so one pathological plugin cannot bury the rest.
+  max-findings-per-rule: 5
+
+agent:
+  # Whether to self-attach the bundled agent at startup.
+  #
+  # The agent is optional. Without it, Windchill attributes classes by scanning plugin jars, which is
+  # exact for anything shipped in a jar. With it, attribution comes from live class loaders, which
+  # additionally covers classes generated at runtime, and /windchill count can measure exact
+  # invocation counts for the methods a capture flagged. /windchill time measures counts and call
+  # times without the agent.
+  #
+  # Attaching requires the server started with:
+  #   -Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading
+  # Without those the attach fails cleanly and everything else keeps working. You can also attach on
+  # demand later with /windchill agent instead of enabling it here.
+  enabled: false
+
+  # Most methods to instrument at once when counting. Each adds one counter increment at method
+  # entry and nothing else, but instrumenting broadly on a live server is still worth bounding.
+  counter-targets: 24
+
+aot:
+  # Seconds to wait for the forked cache-assembly JVM before giving up. Assembly reads a recorded
+  # configuration and writes a cache without starting a server.
+  assemble-timeout-seconds: 300
+
+  # Boots to keep in boot-history.tsv. Windchill records one row per startup so the effect of
+  # adopting an AOT cache is a measured difference on this server rather than a claim.
+  boot-history-rows: 200
+
+  # Boots needed on each side before Windchill will report a startup comparison. Too few and one
+  # slow boot on a busy host decides the answer. The same floor applies to the warm-up comparison.
+  startup-comparison-min-samples: 3
+
+  # Startup captures to keep in warmup-history.tsv, which is what makes the AOT method-profile
+  # benefit measurable rather than asserted.
+  warmup-history-rows: 200
+
+reports:
+  # Total bytes of reports to keep. Oldest go first once the directory exceeds this.
+  max-bytes: 52428800
+
+  # Days to keep a report regardless of the size budget.
+  retention-days: 14

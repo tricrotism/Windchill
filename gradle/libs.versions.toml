@@ -1,0 +1,27 @@
+[versions]
+kotlin = "2.4.20-Beta1"
+
+# Paper 26.2 dropped the -R0.1-SNAPSHOT scheme, so the API tracks builds. run-paper starts the
+# matching server version.
+minecraft = "26.2"
+paper = "26.2.build.+"
+
+cloud = "2.0.0-beta.17"
+cloudAnnotations = "2.0.0"
+
+shadow = "9.4.2"
+runPaper = "3.0.2"
+
+[libraries]
+paper-api = { module = "io.papermc.paper:paper-api", version.ref = "paper" }
+
+cloud-paper = { module = "org.incendo:cloud-paper", version.ref = "cloud" }
+cloud-annotations = { module = "org.incendo:cloud-annotations", version.ref = "cloudAnnotations" }
+
+[bundles]
+cloud = ["cloud-paper", "cloud-annotations"]
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+shadow = { id = "com.gradleup.shadow", version.ref = "shadow" }
+runPaper = { id = "xyz.jpenilla.run-paper", version.ref = "runPaper" }
