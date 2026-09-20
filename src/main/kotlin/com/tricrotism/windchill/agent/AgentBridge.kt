@@ -2,7 +2,6 @@ package com.tricrotism.windchill.agent
 
 import org.slf4j.Logger
 import java.io.File
-import java.lang.reflect.Method
 import java.nio.file.Files
 import java.nio.file.Path
 
@@ -14,7 +13,7 @@ import java.nio.file.Path
  * below goes through reflection on JDK types only.
  *
  * Attaching is opt-in and fully optional. Windchill's analysis runs on JFR and JMX alone; the agent
- * adds exact class ownership and exact invocation counts. Attach needs the server started with
+ * adds exact class ownership. Attach needs the server started with
  * `-Djdk.attach.allowAttachSelf=true`, and JDK 25 warns about dynamic agent loading unless
  * `-XX:+EnableDynamicAgentLoading` is also set.
  */
@@ -60,18 +59,14 @@ class AgentBridge(private val logger: Logger, private val dataFolder: File) {
             val vm = vmClass.getMethod("attach", String::class.java)
                 .invoke(null, ProcessHandle.current().pid().toString())
             try {
-                // The path goes in as the agent argument too: the agent needs its own jar to publish
-                // MethodCounters to the bootstrap loader, which is the only loader plugin classes
-                // reliably delegate to.
-                val path = jar.toAbsolutePath().toString()
-                vmClass.getMethod("loadAgent", String::class.java, String::class.java).invoke(vm, path, path)
+                vmClass.getMethod("loadAgent", String::class.java).invoke(vm, jar.toAbsolutePath().toString())
             } finally {
                 vmClass.getMethod("detach").invoke(vm)
             }
 
             agentClass = ClassLoader.getSystemClassLoader().loadClass(AGENT_CLASS)
             lastError = null
-            logger.info("Windchill agent attached; class ownership and invocation counts are now exact")
+            logger.info("Windchill agent attached, class ownership is now exact")
             null
         } catch (e: ReflectiveOperationException) {
             fail(describeAttachFailure(e))
@@ -94,33 +89,11 @@ class AgentBridge(private val logger: Logger, private val dataFolder: File) {
         }
     }
 
-    /**
-     * Installs invocation counting on the given methods, described as
-     * `"binary.Class name (Ldescriptor;)V"`. Slots follow argument order.
-     *
-     * @return how many classes were retransformed, or 0 when the agent is absent or refused
-     */
-    fun installCounters(methods: List<String>): Int =
-        call("installCounters", arrayOf(Array<String>::class.java), arrayOf(methods.toTypedArray())) as? Int ?: 0
-
-    fun removeCounters() {
-        call("removeCounters")
-    }
-
-    fun counts(): LongArray = call("counts") as? LongArray ?: LongArray(0)
-
-    fun transformFailures(): List<String> =
-        (call("transformFailures") as? Array<*>)?.filterIsInstance<String>() ?: emptyList()
-
-    private fun call(
-        name: String,
-        parameterTypes: Array<Class<*>> = emptyArray(),
-        args: Array<Any?> = emptyArray(),
-    ): Any? {
+    private fun call(name: String): Any? {
         val target = agentClass ?: return null
 
         return try {
-            method(target, name, parameterTypes).invoke(null, *args)
+            target.getMethod(name).invoke(null)
         } catch (e: ReflectiveOperationException) {
             logger.warn("Agent call {} failed; continuing without the agent", name, e)
             agentClass = null
@@ -128,9 +101,6 @@ class AgentBridge(private val logger: Logger, private val dataFolder: File) {
             null
         }
     }
-
-    private fun method(target: Class<*>, name: String, parameterTypes: Array<Class<*>>): Method =
-        target.getMethod(name, *parameterTypes)
 
     /**
      * The agent jar ships inside this plugin's jar. It is written next to the config rather than to
@@ -144,8 +114,8 @@ class AgentBridge(private val logger: Logger, private val dataFolder: File) {
             ?.use { it.readBytes() }
             ?: throw java.io.IOException("$AGENT_JAR is missing from the plugin jar")
 
-        // Only rewrite when the contents differ. The JVM keeps the jar open once it has been added to
-        // the bootstrap search, and replacing an open file is an error on Windows.
+        // Only rewrite when the contents differ. The JVM keeps the jar open once the agent has loaded
+        // from it, and replacing an open file is an error on Windows.
         if (Files.isRegularFile(target) && Files.readAllBytes(target).contentEquals(bundled)) return target
 
         Files.write(target, bundled)

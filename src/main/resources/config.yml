@@ -20,6 +20,10 @@ capture:
   # this point even if nobody closes it, so a forgotten capture cannot run forever.
   max-window-seconds: 600
 
+  # Most flagged methods /windchill time instruments at once. JFR injects timing code into each one's
+  # class for the length of the window, which changes what the JIT decides for it, so keep it bounded.
+  timing-targets: 24
+
   # Execution sampling interval, in milliseconds. This is the hotness signal every rule ranks by.
   # 10ms is roughly 100 samples a second per running thread. Raise it on a busy box to cut overhead,
   # at the cost of needing a longer window to say anything confidently.
@@ -103,19 +107,13 @@ agent:
   #
   # The agent is optional. Without it, Windchill attributes classes by scanning plugin jars, which is
   # exact for anything shipped in a jar. With it, attribution comes from live class loaders, which
-  # additionally covers classes generated at runtime, and /windchill count can measure exact
-  # invocation counts for the methods a capture flagged. /windchill time measures counts and call
-  # times without the agent.
+  # additionally covers classes generated at runtime.
   #
   # Attaching requires the server started with:
   #   -Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading
   # Without those the attach fails cleanly and everything else keeps working. You can also attach on
   # demand later with /windchill agent instead of enabling it here.
   enabled: false
-
-  # Most methods to instrument at once when counting. Each adds one counter increment at method
-  # entry and nothing else, but instrumenting broadly on a live server is still worth bounding.
-  counter-targets: 24
 
 aot:
   # Seconds to wait for the forked cache-assembly JVM before giving up. Assembly reads a recorded

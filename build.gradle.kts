@@ -29,8 +29,6 @@ tasks {
             attributes(
                 "Agent-Class" to "com.tricrotism.windchill.agent.WindchillAgent",
                 "Premain-Class" to "com.tricrotism.windchill.agent.WindchillAgent",
-                "Can-Retransform-Classes" to "true",
-                "Can-Redefine-Classes" to "true",
             )
         }
     }

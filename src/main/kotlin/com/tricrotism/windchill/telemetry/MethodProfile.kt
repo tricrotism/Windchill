@@ -11,8 +11,8 @@ package com.tricrotism.windchill.telemetry
  * sample records whether its top frame was running interpreted, so a method that stays interpreted on
  * a server that has been up for days still shows it.
  *
- * [failureMessages] holds only failures the method itself caused. A JVMTI retransformation (an agent,
- * JFR method timing, Windchill's own counters) abandons whatever is compiling at that moment, and
+ * [failureMessages] holds only failures the method itself caused. A JVMTI retransformation (another
+ * plugin's agent, or JFR method timing) abandons whatever is compiling at that moment, and
  * those are dropped before they get here.
  */
 data class MethodProfile(

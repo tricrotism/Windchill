@@ -1,7 +1,6 @@
 package com.tricrotism.windchill.analysis
 
 import com.tricrotism.windchill.aot.VmFlags
-import com.tricrotism.windchill.telemetry.JitLimits
 import com.tricrotism.windchill.telemetry.JitSnapshot
 
 /**
@@ -31,14 +30,14 @@ class JitTuner {
     ): List<TuningAdvice> =
         listOfNotNull(
             codeCacheSize(snapshot, thresholds),
-            recompilationCutoff(findings),
-            hugeMethods(snapshot, findings),
             if (duringStartup) null else compilerThreads(snapshot, thresholds),
         ) + forcedInlines(snapshot, findings)
 
     /**
-     * A code cache that fills disables the JIT until flushing frees room, server-wide. Doubling it
-     * costs reserved address space, which is cheap next to losing the compiler.
+     * A full code cache stops compilation server-wide, and while its code is still reachable nothing
+     * ages out, so the JIT can stay off until restart. Sized at twice the measured peak rather than
+     * from a rule of thumb, and never past 2048m: JDK 25 refuses to start above that ("Must be at most
+     * 2048M", measured on 25.0.3).
      */
     private fun codeCacheSize(snapshot: JitSnapshot, thresholds: Thresholds): TuningAdvice? {
         val cache = snapshot.codeCache
@@ -47,7 +46,10 @@ class JitTuner {
         if (filled == 0 && cache.usedFraction < thresholds.codeCacheWarnFraction) return null
 
         val current = VmFlags.long(VmFlags.RESERVED_CODE_CACHE_SIZE) ?: cache.maxCapacityBytes
-        val target = (current * 2).coerceAtLeast(MINIMUM_CODE_CACHE)
+        // A fill proves the whole cache was too small. Short of one, the measured peak says how much is used.
+        val wanted = if (filled > 0) current * 2 else cache.peakUsedBytes * 2
+        val target = (Math.ceilDiv(wanted, CODE_CACHE_STEP) * CODE_CACHE_STEP).coerceAtMost(MAXIMUM_CODE_CACHE)
+        if (target <= current) return null
 
         return TuningAdvice(
             flag = VmFlags.RESERVED_CODE_CACHE_SIZE,
@@ -61,32 +63,12 @@ class JitTuner {
 
                 cache.jitRestarts > 0 -> "The JIT restarted ${cache.jitRestarts} time(s) after the cache filled"
 
-                else -> "${cache.fullestHeap?.name ?: "The code cache"} reached ${percentOf(cache.usedFraction)} " +
-                    "full during the window"
+                else -> "The code cache reached ${percentOf(cache.usedFraction)} full during the window " +
+                    "(${megabytes(cache.peakUsedBytes)} of ${megabytes(cache.maxCapacityBytes)})"
             },
-            cost = "Reserves more virtual address space at startup. It is reserved, not committed, so " +
-                "the resident cost follows actual use.",
-        )
-    }
-
-    /**
-     * HotSpot stops compiling a method after it has been deoptimised too many times. Raising the
-     * cutoff buys a method that keeps tripping one assumption a few more chances to settle.
-     */
-    private fun recompilationCutoff(findings: List<Finding>): TuningAdvice? {
-        val permanent = findings.count { it.ruleId == "JIT-4" }
-        if (permanent == 0) return null
-
-        val current = VmFlags.long(VmFlags.PER_METHOD_RECOMPILATION_CUTOFF) ?: return null
-
-        return TuningAdvice(
-            flag = VmFlags.PER_METHOD_RECOMPILATION_CUTOFF,
-            current = current.toString(),
-            recommended = (current * 2).toString(),
-            evidence = "$permanent method(s) were permanently barred from compilation during the window " +
-                "(JIT-4)",
-            cost = "A genuinely unstable method now burns compiler time for longer before HotSpot gives " +
-                "up on it. This buys time; it does not fix the assumption that keeps breaking.",
+            cost = "Reserves more address space at startup. Committed memory grows with peak use and is " +
+                "never returned. With -XX:+UseLargePages on Linux the whole reservation is committed up " +
+                "front. Values above 2048m stop the JVM from starting.",
         )
     }
 
@@ -95,8 +77,10 @@ class JitTuner {
      *
      * Replaces an earlier recommendation to raise FreqInlineSize, which moved the limit for every
      * method in the JVM to admit the few measured here. `-XX:CompileCommand=inline` is a product
-     * option and overrides the size check for one method: measured on JDK 25, a 448-byte callee C2
-     * had refused with "hot method too big" was inlined with "force inline by CompileCommand".
+     * option that overrides the size and compiled-size checks for one callee in every caller, in C1
+     * and C2 alike: measured on JDK 25, a 448-byte callee C2 had refused with "hot method too big" was
+     * inlined with "force inline by CompileCommand". DesiredMethodLimit and MaxInlineLevel still apply,
+     * and a site with several receiver types stays virtual.
      *
      * Only a "hot method too big" refusal qualifies: that is C2 declining a frequent call site on
      * FreqInlineSize. "too big" is the same check at a cold site, where inlining buys nothing. Only
@@ -126,62 +110,51 @@ class JitTuner {
                     recommended = "inline,${method.className}::${method.methodName}",
                     evidence = "${method.shortLabel} is $size bytes of bytecode against " +
                         "FreqInlineSize=${limits.freqInlineSize} and was refused inlining at a hot call site (JIT-1)",
-                    cost = "Inlines it wherever it is called, not only at the hot site, so each caller's " +
-                        "compiled code grows by roughly its size. Splitting the method is the better fix " +
-                        "where you own it.",
+                    cost = "Inlines it into every caller in both C1 and C2, including rarely run call sites, " +
+                        "so each caller's compiled code grows and uses up inlining budget other callees " +
+                        "would have had. A misspelled command stops the JVM from starting. Single-quote it " +
+                        "or put it in a file passed with -XX:CompileCommandFile, because a shell drops the $ " +
+                        "in a nested class name and the command then silently matches nothing. Splitting " +
+                        "the method is the better fix where you own it.",
                 )
             }
             .toList()
     }
 
     /**
-     * Lets HotSpot compile methods over the 8000-byte limit, which it otherwise leaves interpreted
-     * for the life of the JVM. Measured on JDK 25: a hot 8944-byte method took 831 of 835 samples
-     * interpreted, and 6 of 839 once this flag let it compile.
-     */
-    private fun hugeMethods(snapshot: JitSnapshot, findings: List<Finding>): TuningAdvice? {
-        val limits = snapshot.limits ?: return null
-        val huge = findings
-            .filter { it.ruleId == "JIT-8" }
-            .mapNotNull { it.method }
-            .filter { method -> snapshot.bytecodeSize(method)?.let(limits::neverCompiles) == true }
-        if (huge.isEmpty()) return null
-
-        return TuningAdvice(
-            flag = VmFlags.DONT_COMPILE_HUGE_METHODS,
-            current = "true",
-            recommended = "false",
-            evidence = "${huge.size} hot method(s) over ${JitLimits.HUGE_METHOD_LIMIT} bytes of bytecode ran " +
-                "interpreted (JIT-8): ${huge.joinToString(", ") { it.shortLabel }}",
-            cost = "Applies to every huge method that gets hot, not only these. Their compiles are long and " +
-                "their code is large, and C2 may still give up on one and settle for tier 1, which is " +
-                "still far faster than the interpreter. Splitting the method is the real fix.",
-        )
-    }
-
-    /**
-     * More compiler threads only help when the queue is genuinely backed up and there are cores to
-     * spare, because compiler threads compete with tick threads for the same CPUs.
+     * More compiler threads only help when the C2 queue stays deep and there are cores to spare,
+     * because compiler threads compete with tick threads for the same CPUs.
      *
-     * Never offered from a startup window. Every server has a compiler backlog while it boots, and it
-     * clears on its own, so recommending a flag for it would contradict what the VM-2 finding says
-     * about the same measurement.
+     * Gated on the median C2 queue depth, since every burst of new code produces a peak. Never
+     * offered from a startup window, where a backlog is normal and clears itself, and never while the
+     * code cache is tight, since more compilation fills it faster.
+     *
+     * HotSpot gives C1 `max(count / 3, 1)` threads and C2 the rest (`compilationPolicy.cpp`, JDK 25), so
+     * the count recommended is the smallest that adds one C2 thread. Setting the flag keeps dynamic
+     * compiler threads on: the count is a ceiling, and extra threads only start when the queue is deep.
      */
     private fun compilerThreads(snapshot: JitSnapshot, thresholds: Thresholds): TuningAdvice? {
-        if (snapshot.codeCache.peakQueueLength < thresholds.compilerQueueWarnLength) return null
+        val cache = snapshot.codeCache
+        if (cache.medianC2QueueLength < thresholds.compilerQueueWarnLength) return null
+        if (cache.usedFraction >= thresholds.codeCacheWarnFraction) return null
 
-        val current = VmFlags.long(VmFlags.CI_COMPILER_COUNT) ?: return null
+        val current = VmFlags.long(VmFlags.CI_COMPILER_COUNT)?.toInt() ?: return null
         val cores = Runtime.getRuntime().availableProcessors()
         if (cores < MINIMUM_CORES_TO_ADD_COMPILERS) return null
+
+        val c2Threads = { count: Int -> count - maxOf(count / 3, 1) }
+        val recommended = generateSequence(current + 1) { it + 1 }.first { c2Threads(it) > c2Threads(current) }
 
         return TuningAdvice(
             flag = VmFlags.CI_COMPILER_COUNT,
             current = current.toString(),
-            recommended = (current + 2).toString(),
-            evidence = "The compiler queue peaked at ${snapshot.codeCache.peakQueueLength} methods " +
-                "(VM-2) on a machine with $cores cores",
-            cost = "Compiler threads compete with tick threads for cores. Only worth it if this server " +
-                "has headroom, and worth reverting if tick times get worse.",
+            recommended = recommended.toString(),
+            evidence = "The C2 queue held a median of ${cache.medianC2QueueLength} methods across the " +
+                "window (VM-2) on a machine with $cores cores",
+            cost = "Adds one C2 thread. Each can use hundreds of MB of native memory while compiling a " +
+                "large method. Extra threads start only when the queue is deep, so they compete with " +
+                "tick threads during warm-up and bursts. The count stops scaling with the machine once " +
+                "set. On Folia, count the cores left after the region threads. Revert if tick times get worse.",
         )
     }
 
@@ -192,7 +165,8 @@ class JitTuner {
         String.format(java.util.Locale.ROOT, "%.0f%%", fraction * 100)
 
     private companion object {
-        const val MINIMUM_CODE_CACHE = 512L * 1024 * 1024
+        const val MAXIMUM_CODE_CACHE = 2048L * 1024 * 1024
+        const val CODE_CACHE_STEP = 16L * 1024 * 1024
         const val MINIMUM_CORES_TO_ADD_COMPILERS = 8
         const val FORCE_INLINE_CEILING = 2
         const val MAXIMUM_FORCED_INLINES = 5

@@ -13,18 +13,18 @@ Built on the JDK's public Flight Recorder API. No NMS, no server internals.
 
 ## What it finds
 
-| Rule | What it means |
-|---|---|
-| **JIT-1** | A hot method C2 refused to inline because of its size, with its real size against the live limit |
-| **JIT-2** | A hot virtual or interface call that compiled code still makes as a real call, located to the line |
-| **JIT-3** | A method deoptimising repeatedly, with the line, the instruction and the caller that triggered it |
-| **JIT-4** | A method HotSpot has permanently barred from compilation. It runs interpreted until restart |
-| **JIT-5** | Hot code the optimising compiler is not keeping, with in-window evidence for why |
-| **JIT-6** | A method compiled over and over inside one window |
-| **JIT-7** | A method the compiler tried to compile and bailed out of, with HotSpot's reason |
-| **JIT-8** | A hot method running in the interpreter, usually one over 8000 bytes that HotSpot never compiles |
-| **VM-1** | Code cache pressure per code heap, and how much machine code each plugin holds in it |
-| **VM-2** | A compiler queue backlog leaving code interpreted while it waits |
+| Rule      | What it means                                                                                                                                   |
+|-----------|-------------------------------------------------------------------------------------------------------------------------------------------------|
+| **JIT-1** | A hot method C2 refused to inline because of its size, with its real size against the live limit                                                |
+| **JIT-2** | A hot virtual or interface call that compiled code still makes as a real call, located to the line                                              |
+| **JIT-3** | A method deoptimising repeatedly, with the line, the instruction and the caller that triggered it                                               |
+| **JIT-4** | A method HotSpot has permanently barred from C2. It runs as slower C1 code until restart. Only JVMCI compilers such as Graal report this to JFR |
+| **JIT-5** | Hot code the optimising compiler is not keeping, with in-window evidence for why                                                                |
+| **JIT-6** | A method compiled over and over inside one window                                                                                               |
+| **JIT-7** | A method the compiler tried to compile and bailed out of, with HotSpot's reason                                                                 |
+| **JIT-8** | A hot method running in the interpreter, usually one over 8000 bytes that HotSpot never compiles                                                |
+| **VM-1**  | Code cache pressure per code heap, and how much machine code each plugin holds in it                                                            |
+| **VM-2**  | A compiler queue backlog leaving code interpreted while it waits                                                                                |
 
 Every finding carries the measurement that produced it and a specific change to make. Findings are
 ranked by severity first and by measured hotness within it, so a compiler complaint about a method
@@ -51,35 +51,50 @@ operator through the lifecycle one step at a time and measures the result.
 /windchill flags        every JVM flag Windchill can justify from what it measured
 ```
 
-It does two separate jobs, and the second is the one most people miss:
+It does two separate jobs:
 
-- **Cached classes** cut the parse, verify and link work at startup.
-- **Recorded method profiles** let hot methods enter the optimising compiler on boot instead of
-  interpreting their way up through the tiers.
+- **Cached classes** cut the parse and verify work at startup. This covers Paper's and every
+  plugin's classes, even though they load through their own class loaders.
+- **Recorded method profiles** let hot methods skip the profiling tiers on boot. On JDK 25 these are
+  recorded only for classes on the JDK's built-in loaders, which on Paper means JDK methods. Paper and
+  plugin methods are cached as classes but still warm up through the tiers. Measured with two
+  identical hot classes: the one on the application loader had training data, the one in a
+  `URLClassLoader` subclass had none.
 
 Windchill measures both on your own server rather than asserting them, by recording one row per boot
 and comparing medians. Measured on the test server in this repo:
 
-| | without a cache | with a cache |
-|---|---|---|
-| Time to plugin enable | 15,965 ms | **11,736 ms** |
-| Compilations during the startup window | 640 | **383** |
+|                                        | without a cache | with a cache  |
+|----------------------------------------|-----------------|---------------|
+| Time to plugin enable                  | 15,965 ms       | **11,736 ms** |
+| Compilations during the startup window | 640             | **383**       |
 
-The first row is the class-loading saving. The second is the method-profile saving, and it is the
-reason the cache is a JIT feature and not only a startup one: the same workload reaches the same
-place having spent 40% fewer compilations getting there. Both need the automatic startup capture to
-be on, since the comparison is only valid taken at the same point after every boot.
+The first row is mostly the class-loading saving. The second is the method-profile saving, from JDK
+methods reaching the optimising compiler without climbing the tiers. Both need the automatic startup
+capture to be on, since the comparison is only valid taken at the same point after every boot.
 
-Two things worth knowing, both verified rather than assumed:
+Things worth knowing, all measured on Temurin 25.0.3:
 
-- **A stale cache is safe, and degrades per class.** HotSpot checks each class against its source and
-  loads from the jar when they disagree. Updating a plugin costs only the classes that changed: a
-  rebuilt plugin on the test server still had 554 of its 760 classes served. `/windchill aot` reads
-  the JVM's own class list and says how many of each plugin's classes the cache serves.
+- **A stale plugin jar is safe, and degrades per class.** HotSpot checks each plugin class against
+  its jar and loads from the jar when they disagree. Updating a plugin costs only the classes that
+  changed: a rebuilt plugin on the test server still had 554 of its 760 classes served.
+  `/windchill aot` reads the JVM's own class list and says how many of each plugin's classes the cache
+  serves.
+- **The server jar is not safe to change.** Classes from the jar on the application class path (the
+  Paperclip launcher) are not checked on 25.0.3: a class changed after training ran its old cached
+  version with no warning (JDK-8377932). Later builds refuse the whole cache instead. Re-train after
+  every Paper or Java update. `/windchill aot` warns when the server jar is newer than the cache.
 - **Train with the flags you run with.** A cache trained on G1 is refused outright under ZGC, with a
-  heap moved across about 32 GB, or with `UseCompactObjectHeaders` flipped. A refused cache also turns
-  off the JDK's own class sharing, so the server boots slower than with no cache flag at all. Windchill
-  warns about this at startup and keeps those boots out of its startup comparison.
+  heap moved across about 32 GB, with `UseCompactObjectHeaders` flipped, or with `--add-opens` that
+  differ from training. A refused cache also turns off the JDK's own class sharing, so the server
+  boots slower than with no cache flag at all. Windchill warns about this at startup and keeps those
+  boots out of its startup comparison.
+- **The training run costs memory at exit.** With `-XX:AOTCacheOutput` the JVM builds the cache in a
+  second JVM given the same heap flags, so the machine briefly needs room for two heaps. The two-step
+  `-XX:AOTMode=record` plus `/windchill aot assemble` avoids that. Killing the JVM while it builds
+  leaves an empty cache file.
+- **Use `-XX:AOTMode=auto`, not `on`.** With `on` a cache the JVM refuses stops the server starting,
+  so an unattended Java or Paper update keeps it down.
 - **Directory classpath entries are never cached.** HotSpot skips them with "Unsupported location".
   Only jars are cached.
 - **Two plugins shading the same library without relocating it get one cached copy between them.**
@@ -98,46 +113,35 @@ leaves any class JFR rewrote out of the cache that run writes.
 
 ## The optional agent
 
-Windchill works without it. Attaching adds two things:
+Windchill works without it. Attaching adds **exact attribution**, read from live class loaders rather
+than by scanning plugin jars, which also covers classes generated at runtime.
 
-- **Exact attribution**, read from live class loaders rather than by scanning plugin jars. This
-  additionally covers classes generated at runtime.
-- **Exact invocation counts** for the methods a capture flagged, via `/windchill count`. Sampling
-  says where time goes; counts say how many calls it took to get there. A method with 230,000 calls
-  and a small sampled share is a cheap method called too often, which is a different problem from a
-  slow one.
-
-The injection is one counter increment at method entry. Nothing is wrapped, no exception table is
-rewritten and no method is renamed. Transformation uses the JDK's own `java.lang.classfile` API, so
-there is no bytecode library to clash with a plugin's shaded copy. `/windchill count stop` reverts
-every instrumented class to its original bytecode.
-
-**The agent and the AOT cache work against each other in the same session.** The agent publishes its
-counter class to the bootstrap loader, because that is the only loader plugin classes reliably
-delegate to, and the JVM responds by restricting cache sharing to boot classes for the rest of the
-run. Windchill says so when you attach on a server using a cache. Use one or the other per session.
+The agent reads and never rewrites. It injects no bytecode and does not touch the bootstrap loader,
+so it leaves an AOT cache in use alone. Earlier versions counted invocations by injecting a counter
+into flagged methods. That was removed: `/windchill time` gives the same counts plus per-call time
+without an agent, and publishing the counter to the bootstrap loader stopped the JVM serving
+application class loader classes from the cache for the rest of the run.
 
 ## Commands
 
 All require `windchill.use` (default: op).
 
-| Command | Description |
-|---|---|
-| `/windchill` | State, and a summary of the last capture |
-| `/windchill capture [seconds] [--inline]` | Open a capture window |
-| `/windchill stop` | Close the window early and report |
-| `/windchill report` | Findings from the last capture |
-| `/windchill report write` | Full findings with evidence, to a file |
-| `/windchill plugins` | Plugins ranked by what was found against them |
-| `/windchill flags` | Recommended JVM flags, AOT and JIT |
+| Command                                   | Description                                                 |
+|-------------------------------------------|-------------------------------------------------------------|
+| `/windchill`                              | State, and a summary of the last capture                    |
+| `/windchill capture [seconds] [--inline]` | Open a capture window                                       |
+| `/windchill stop`                         | Close the window early and report                           |
+| `/windchill report`                       | Findings from the last capture                              |
+| `/windchill report write`                 | Full findings with evidence, to a file                      |
+| `/windchill plugins`                      | Plugins ranked by what was found against them               |
+| `/windchill flags`                        | Recommended JVM flags, AOT and JIT                          |
 | `/windchill time [seconds]` / `time stop` | Exact calls and per-call time for flagged methods, no agent |
-| `/windchill aot` | Cache state, the next step, and classes served per plugin |
-| `/windchill aot finish` | End a training run and write its output without stopping |
-| `/windchill aot assemble` | Build a cache from a recorded configuration |
-| `/windchill agent` | Attach the optional agent |
-| `/windchill count start` / `count` / `count stop` | Invocation counts for flagged methods |
-| `/windchill rules` | The detectors Windchill runs |
-| `/windchill reload` | Re-read config.yml |
+| `/windchill aot`                          | Cache state, the next step, and classes served per plugin   |
+| `/windchill aot finish`                   | End a training run and write its output without stopping    |
+| `/windchill aot assemble`                 | Build a cache from a recorded configuration                 |
+| `/windchill agent`                        | Attach the optional agent                                   |
+| `/windchill rules`                        | The detectors Windchill runs                                |
+| `/windchill reload`                       | Re-read config.yml                                          |
 
 `inline` records every inlining decision the JIT makes. It is the highest-volume event the JVM emits
 and it is what produces JIT-1, so ask for it on a short window.
@@ -145,12 +149,34 @@ and it is what produces JIT-1, so ask for it on a short window.
 ## JIT flags
 
 `/windchill flags` only recommends a flag a measurement justifies, reads its current value from the
-running JVM, and says what it costs. The targeted ones are preferred over global ones:
+running JVM, and says what it costs. Targeted flags are preferred over global ones. Every cost below
+was measured on Temurin 25.0.3 or read from the JDK 25 source.
 
 - `-XX:CompileCommand=inline,<Class>::<method>` for a hot callee C2 refused as slightly too big,
-  instead of raising `FreqInlineSize` for every method in the JVM.
-- `-XX:-DontCompileHugeMethods` when a hot method over 8000 bytes of bytecode is running interpreted.
-  On the test plugin this took a huge method from 34% of samples to 4%.
+  instead of raising `FreqInlineSize` for every method in the JVM. It forces the inline into every
+  caller in C1 and C2, including cold ones. A misspelled command stops the JVM from starting, and a
+  shell silently drops the `$` of a nested class unless the argument is single-quoted.
+- `-XX:ReservedCodeCacheSize` when the code cache filled or is close to it, sized at twice the
+  measured peak and never above 2048m, where the JVM refuses to start. A full cache stops all new
+  compilation, and while its code is still in use nothing is freed, so it can last until restart.
+  Committed memory follows use and is never returned. With `-XX:+UseLargePages` on Linux the whole
+  reservation is committed at startup.
+- `-XX:CICompilerCount` only when the C2 queue stays deep across a window that is not the startup
+  capture, on 8 or more cores, and with the code cache not tight. It names the smallest count that
+  adds one C2 thread (C1 takes a third of the count). The count is a ceiling: threads start only
+  when the queue is deep.
+
+Deliberately not recommended:
+
+- `-XX:-DontCompileHugeMethods`. It has no per-method form, so it applies to every method over
+  8000 bytes of bytecode. Measured, it took a hot 8944-byte method from 34% of samples to 4%, and
+  one such C2 compile took 30 to 300 ms. HotSpot inlines nothing into a method that size, so the
+  compiled result is still slower than a split method. The 32 methods over the limit in Paper and
+  its libraries are all one-shot bootstrap code. JIT-8 says to split the method and names the flag
+  as a stopgap.
+- `-XX:PerMethodRecompilationCutoff`. Reaching it moves a method from C2 to C1 code, not to the
+  interpreter, and C2 stops speculating on a trap long before the cutoff. Raising it only adds
+  compile and throw-away cycles for a method whose assumption keeps breaking.
 
 ## Requirements
 
@@ -162,8 +188,10 @@ running JVM, and says what it costs. The targeted ones are preferred over global
   ```
   -Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading
   ```
-  Without them the attach fails cleanly and everything else keeps working. JDK 25 warns that dynamic
-  agent loading will be disallowed by default in a future release.
+  Without them the attach fails cleanly and everything else keeps working. `EnableDynamicAgentLoading`
+  is already on by default in JDK 25, so setting it only silences the warning that a future release
+  will turn it off. `allowAttachSelf` lets a JVM attach to itself and opens nothing to other
+  processes. `-XX:+DisableAttachMechanism` is the setting that closes attach to other local processes.
 
 ## Cost
 

@@ -64,7 +64,8 @@ class AotOrchestrator(
                     "Leave the server up under real player load for at least 20 minutes, with the GC, heap " +
                         "size and flags it will run with. A cache trained under different ones can be refused.",
                     "Then run /windchill aot finish to write the cache without stopping the server, or " +
-                        "/stop it. Killing the process writes nothing.",
+                        "/stop it. Killing the process writes nothing, and killing it while the cache is " +
+                        "being built leaves an empty file the next boot refuses.",
                     "Then swap -XX:AOTCacheOutput=${env.cacheOutput} for " +
                         "-XX:AOTCache=${env.cacheOutput} and start again.",
                 ),
@@ -87,7 +88,9 @@ class AotOrchestrator(
                 instructions = listOf(
                     "The server log says why, under \"Unable to use AOT cache\". The causes measured on JDK 25 " +
                         "are the object layout changing since training: ZGC against a cache trained on G1, a " +
-                        "heap moved across about 32 GB, or UseCompactObjectHeaders flipped.",
+                        "heap moved across about 32 GB, or UseCompactObjectHeaders flipped. A different Java " +
+                        "build, or --add-opens or --enable-native-access differing from training, is refused " +
+                        "too, and from Java 25.0.4 so is a changed server jar.",
                     "Re-train with exactly the GC, heap size and flags you run with:",
                     "-XX:AOTCacheOutput=${env.effectiveCache}",
                     "Or remove -XX:AOTCache until then, which restores the JDK's own class sharing.",
@@ -99,21 +102,30 @@ class AotOrchestrator(
                 summary = "An AOT cache is configured and present " +
                     "(${megabytes(env.cacheBytes)}, mode ${env.mode.flagValue}).",
                 instructions = buildList {
+                    if (serverJarChangedSince(env)) {
+                        add(
+                            "The server jar is newer than the cache, usually a Paper update. Re-train now. " +
+                                "Java 25.0.3 does not check that jar against the cache and keeps running the " +
+                                "classes it cached from it (JDK-8377932), and later builds refuse the whole cache.",
+                        )
+                    }
                     add(
                         if (env.profilesInPlay) {
-                            "Recorded method profiles are being replayed, so hot methods enter the " +
-                                "optimising compiler on boot instead of warming up through the tiers. " +
-                                "The cache is saving JIT time as well as class-loading time."
+                            "Recorded method profiles are being replayed for JDK methods, which cut startup " +
+                                "compilations on the test server from 640 to 383. Paper and plugin classes " +
+                                "load through their own class loaders, which get cached classes but no " +
+                                "profiles, so their methods still warm up through the tiers."
                         } else {
-                            "This cache carries no method profiles, so it saves class loading only and " +
-                                "the JIT still warms up from cold. Re-train with -XX:AOTMode=record or " +
-                                "-XX:AOTCacheOutput so the training run records them."
+                            "This cache carries no method profiles, so it saves class loading only. Re-train " +
+                                "with -XX:AOTMode=record or -XX:AOTCacheOutput so the training run records " +
+                                "them for JDK methods."
                         },
                     )
                     add(
                         "Below, the classes the cache actually serves per plugin. A plugin updated or " +
-                            "installed since training reads its new classes from the jar. Nothing breaks " +
-                            "meanwhile, so re-train when enough has drifted.",
+                            "installed since training reads its changed classes from the jar, so nothing " +
+                            "breaks meanwhile. Re-train when enough has drifted, and after every Paper or " +
+                            "Java update.",
                     )
                 },
             )
@@ -135,17 +147,22 @@ class AotOrchestrator(
 
             else -> AotPlan(
                 stage = "off",
-                summary = "No AOT cache is configured. Every class is parsed, verified and linked on " +
-                    "every boot, and the JIT warms up from cold every time.",
+                summary = "No AOT cache is configured. The JDK's own archive covers JDK classes, but every " +
+                    "Paper and plugin class is parsed and verified on every boot.",
                 instructions = buildList {
                     add("Add this to the server's start command, then restart:")
                     add("-XX:AOTCacheOutput=${cachePath}")
-                    add("Play on it for 20 minutes, then /stop. The JVM writes the cache on exit.")
+                    add(
+                        "Play on it for 20 minutes, then /stop. At exit the JVM starts a second JVM with the " +
+                            "same heap flags to build the cache, so the machine briefly needs room for two " +
+                            "heaps. On a tight container use -XX:AOTMode=record " +
+                            "-XX:AOTConfiguration=${configurationPath} and /windchill aot assemble instead.",
+                    )
                     add("Then swap that flag for -XX:AOTCache=${cachePath} and start normally.")
                     add(
-                        "The training run records method profiles as well as classes, so the cache " +
-                            "shortens JIT warm-up too, not just startup. Train under real load for that " +
-                            "to be worth anything.",
+                        "The cache holds Paper and plugin classes, and method profiles for JDK methods only, " +
+                            "since Paper and plugins load through their own class loaders. Longer play mainly " +
+                            "widens which classes are cached.",
                     )
                     val directories = environment.directoryClassPathEntries
                     if (directories.isNotEmpty()) {
@@ -158,11 +175,34 @@ class AotOrchestrator(
     }
 
     /**
+     * Whether a jar on the application class path, the Paperclip launcher on Paper, was modified after
+     * the cache was written.
+     *
+     * Measured on JDK 25.0.3: a class changed in such a jar after training still ran its old cached
+     * version, with no warning, under both `auto` and `on`. Classes from plugin and server loaders are
+     * checked per class and fall back to the jar, so only this class path needs the check.
+     */
+    private fun serverJarChangedSince(env: AotEnvironment): Boolean {
+        val cache = env.effectiveCache?.takeIf { Files.isRegularFile(it) } ?: return false
+        val built = Files.getLastModifiedTime(cache).toMillis()
+
+        return env.classPath.split(File.pathSeparatorChar)
+            .map { Path.of(it) }
+            .filter { it.toString().endsWith(".jar") && Files.isRegularFile(it) }
+            .any { Files.getLastModifiedTime(it).toMillis() > built }
+    }
+
+    /**
      * Forks the assemble step and waits for it.
      *
      * Runs a second JVM that reads the recorded configuration and writes the cache. It does not start
      * a server, so the only cost to the running one is the CPU the child uses. Call it off the tick
      * threads: it blocks for as long as the assembly takes.
+     *
+     * The child gets this server's `-XX` options and `-Xmx`. Measured on JDK 25.0.3: a configuration
+     * recorded under ZGC fails to assemble without `-XX:+UseZGC` ("Unable to map shared spaces"), and
+     * the same holds for compact headers and a heap across about 32 GB. `-Xms` and pre-touch are left
+     * out so the child does not commit a server-sized heap it never uses.
      */
     fun assemble(timeoutSeconds: Long): AotAssembly {
         val env = environment
@@ -174,8 +214,11 @@ class AotOrchestrator(
                 output = "No recorded AOT configuration found. Train first: see /windchill aot.",
             )
 
-        val command = listOf(
-            env.javaExecutable.toString(),
+        val inherited = env.jvmArguments.filter { arg ->
+            arg.startsWith("-Xmx") ||
+                arg.startsWith("-XX:") && INHERITED_EXCLUSIONS.none { arg.contains(it, ignoreCase = true) }
+        }
+        val command = listOf(env.javaExecutable.toString()) + inherited + listOf(
             "-Djava.class.path=${env.classPath}",
             "-XX:AOTMode=create",
             "-XX:AOTConfiguration=$configuration",
@@ -389,6 +432,9 @@ class AotOrchestrator(
         const val CONFIGURATION_NAME = "windchill.aotconf"
         const val ASSEMBLY_LOG = "aot-assembly.log"
         const val SKIP_LOG = "aot-skipped.log"
+
+        /** Server options the assembly JVM must not inherit: its own AOT flags come after, and the rest cost memory or write files. */
+        val INHERITED_EXCLUSIONS = listOf("AOT", "AlwaysPreTouch", "StartFlightRecording", "FlightRecorder")
 
         /** `Skipping com/foo/Bar: Signed JAR`, as `VM.log` writes it with no decorators. */
         val SKIP_LINE = Regex("""Skipping (\S+): (.+)""")

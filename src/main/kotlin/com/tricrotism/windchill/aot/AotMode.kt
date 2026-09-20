@@ -31,7 +31,9 @@ enum class AotMode(val flagValue: String) {
         get() = this == ON || this == AUTO
 
     companion object {
+        /** `required` is JDK 27's name for `on` (JDK-8383031). */
         fun parse(value: String?): AotMode =
-            entries.firstOrNull { it.flagValue.equals(value, ignoreCase = true) } ?: OFF
+            if (value.equals("required", ignoreCase = true)) ON
+            else entries.firstOrNull { it.flagValue.equals(value, ignoreCase = true) } ?: OFF
     }
 }

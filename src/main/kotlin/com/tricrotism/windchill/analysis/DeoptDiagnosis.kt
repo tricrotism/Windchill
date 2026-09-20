@@ -9,7 +9,11 @@ package com.tricrotism.windchill.analysis
  */
 object DeoptDiagnosis {
 
-    /** The method will never be compiled again for the life of the JVM. */
+    /**
+     * The method will never get C2 code again for the life of the JVM. Stock C2 on JDK 25 never posts
+     * this action to JFR: a method barred by the recompilation cutoff shows as `reinterpret` and then
+     * compiles at tier 1. Only JVMCI compilers such as Graal emit it.
+     */
     fun isPermanent(action: String): Boolean = action.contains("not_compilable", ignoreCase = true)
 
     /**
@@ -90,8 +94,8 @@ object DeoptDiagnosis {
 
         return when {
             isPermanent(action) ->
-                "$base HotSpot has marked this method not compilable, so it runs interpreted from now " +
-                    "on and will not recover without a restart."
+                "$base HotSpot has stopped optimising this method with C2. It now runs as lightly " +
+                    "optimised C1 code, and only a restart gives it C2 code again."
 
             isRecompiling(action) ->
                 "$base Each occurrence throws away the compiled code and recompiles it, so the method " +

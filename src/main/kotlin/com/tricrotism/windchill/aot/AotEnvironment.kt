@@ -65,11 +65,11 @@ data class AotEnvironment(
     /**
      * Whether this JVM is replaying recorded method profiles as well as loading cached classes.
      *
-     * An AOT cache does two separate jobs. Cached classes cut the parse, verify and link work at
-     * startup; recorded method profiles let hot methods enter the optimising compiler immediately
-     * instead of interpreting their way up through the tiers. The second is what makes the cache a
-     * JIT feature rather than only a startup one, and a cache produced without a training run has
-     * the first and not the second.
+     * An AOT cache does two separate jobs. Cached classes cut the parse and verify work at startup;
+     * recorded method profiles let hot methods skip the profiling tiers. On JDK 25 profiles are kept
+     * only for classes on the built-in loaders, so on Paper they cover JDK methods and not Paper or
+     * plugin code (measured with a `URLClassLoader` subclass). A cache produced without a training run
+     * has the first job and not the second.
      */
     val profilesInPlay: Boolean
         get() = replayingProfiles && cacheExists && sharing

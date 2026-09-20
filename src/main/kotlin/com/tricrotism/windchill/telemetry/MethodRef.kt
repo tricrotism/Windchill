@@ -2,7 +2,7 @@ package com.tricrotism.windchill.telemetry
 
 /**
  * One method, as JFR names it. The descriptor is kept because overloads compile, deoptimise and
- * inline independently, and because the agent needs it to find the method again for instrumentation.
+ * inline independently.
  *
  * Class names are normalised on the way in. JFR reports the same class differently depending on the
  * event: `jdk.CompilerInlining` describes its callee in internal form with a `+` before a hidden
@@ -31,10 +31,6 @@ data class MethodRef(
 
     val fullLabel: String
         get() = if (hidden) hiddenLabel(qualified = true) else "$className.$methodName"
-
-    /** The form [com.tricrotism.windchill.agent.AgentBridge.installCounters] expects. */
-    val agentTarget: String
-        get() = "$className $methodName $descriptor"
 
     /**
      * Names a generated class by what a reader can actually find: the class that declares it.

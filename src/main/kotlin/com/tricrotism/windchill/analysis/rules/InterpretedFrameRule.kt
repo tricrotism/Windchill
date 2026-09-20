@@ -18,7 +18,9 @@ import com.tricrotism.windchill.telemetry.MethodProfile
  *
  * The usual cause is a method over 8000 bytes of bytecode, which HotSpot never compiles. Measured on
  * JDK 25: a hot 8944-byte method ran interpreted in all 832 of its samples and dominated its loop;
- * with `-XX:-DontCompileHugeMethods` it compiled to tier 4 and fell to 6 samples.
+ * with `-XX:-DontCompileHugeMethods` it compiled to tier 4 and fell to 6 samples. That flag is global
+ * (the size check in `CompilationPolicy::can_be_compiled` runs before any per-method option), so the
+ * finding names it as a stopgap in its suggestion rather than as a recommended flag.
  *
  * Methods [PermanentlyInterpretedRule] or [CompilationFailureRule] already explain are left to them.
  * Without a size explanation the rule stays quiet while the compiler queue is backed up, because a
@@ -86,12 +88,17 @@ class InterpretedFrameRule : Rule {
                     suggestion = if (huge) {
                         "Split ${profile.method.shortLabel} into methods under ${JitLimits.HUGE_METHOD_LIMIT} bytes. " +
                             "Large switch or when blocks and long generated bodies are the usual cause; moving each " +
-                            "case body into its own method is enough. Until the plugin changes, " +
-                            "-XX:-DontCompileHugeMethods lets HotSpot compile it (see /windchill flags)."
+                            "case body into its own method is enough. -XX:-DontCompileHugeMethods also compiles it, " +
+                            "but it lifts the limit for every huge method in the JVM. Measured on JDK 25, one such " +
+                            "compile took 30 to 300 ms of a compiler thread, and HotSpot inlines nothing into a " +
+                            "method this size, so the compiled code is still slower than a split method. A compile " +
+                            "that runs out of nodes is abandoned once and the method falls back to C1. Treat it as " +
+                            "a stopgap for code you cannot change, and capture again after turning it on."
                     } else {
-                        "Nothing in this window explains it, so the cause happened earlier in the run. HotSpot " +
-                            "stops compiling a method after repeated deoptimisation and says so only once. Capture " +
-                            "right after a restart to catch the JIT-4 finding that names the reason."
+                        "Nothing in this window explains it. A method under the size limit normally leaves the " +
+                            "interpreter within seconds, so check for a CompileCommand exclude, a code cache that " +
+                            "filled earlier (VM-1), or a compile that failed at both tiers. Capture right after a " +
+                            "restart to see its compilations."
                     },
                     method = profile.method,
                     hotness = hotness,

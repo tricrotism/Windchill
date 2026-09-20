@@ -81,6 +81,8 @@ internal class JitAccumulator(
     private var codeCacheFullEvents = 0
     private var jitRestarts = 0
     private var peakQueueSize = 0L
+
+    private val c2QueueSizes = ArrayList<Long>()
     private var standardCompiles = 0L
     private var osrCompiles = 0L
 
@@ -236,6 +238,7 @@ internal class JitAccumulator(
 
     private fun onCompilerQueue(event: RecordedEvent) {
         peakQueueSize = maxOf(peakQueueSize, event.getLong("peakQueueSize"))
+        if (event.getString("compiler") == C2) c2QueueSizes += event.getLong("queueSize")
     }
 
     private fun onCompilerStatistics(event: RecordedEvent) {
@@ -285,6 +288,7 @@ internal class JitAccumulator(
                 jitRestarts = jitRestarts,
                 heaps = heaps.map { (name, heap) -> CodeHeapState(name, heap.sizeBytes, heap.peakUsedBytes, heap.fullCount) },
                 peakQueueLength = peakQueueSize,
+                medianC2QueueLength = c2QueueSizes.sorted().let { if (it.isEmpty()) 0L else it[it.size / 2] },
                 standardCompileCount = standardCompiles,
                 osrCompileCount = osrCompiles,
             ),
@@ -339,5 +343,6 @@ internal class JitAccumulator(
         const val DEOPT_SITE_CAP = 16
         const val DEOPT_CALLER_CAP = 4
         const val FAILURE_MESSAGE_CAP = 4
+        const val C2 = "c2"
     }
 }

@@ -44,9 +44,9 @@ class CompilerBacklogRule : Rule {
                     "The queue is being fed by recompilation rather than by new code. Fix the JIT-6 " +
                         "findings and the backlog goes with them."
                 } else {
-                    "A deep queue shortly after a restart is normal and clears itself. If it stays deep " +
-                        "under steady load, raise -XX:CICompilerCount only after confirming the server " +
-                        "has spare cores, since compiler threads compete with tick threads for them."
+                    "A deep queue shortly after a restart is normal and clears itself. If the C2 queue " +
+                        "stays deep under steady load, /windchill flags says whether one more C2 thread " +
+                        "is justified. Compiler threads compete with tick threads for cores."
                 },
                 hotness = 0.0,
             ),

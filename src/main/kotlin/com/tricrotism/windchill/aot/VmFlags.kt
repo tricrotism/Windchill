@@ -34,7 +34,6 @@ object VmFlags {
     const val COMPILE_COMMAND = "CompileCommand"
     const val RESERVED_CODE_CACHE_SIZE = "ReservedCodeCacheSize"
     const val CI_COMPILER_COUNT = "CICompilerCount"
-    const val PER_METHOD_RECOMPILATION_CUTOFF = "PerMethodRecompilationCutoff"
 
     const val AOT_RECORD_TRAINING = "AOTRecordTraining"
     const val AOT_REPLAY_TRAINING = "AOTReplayTraining"

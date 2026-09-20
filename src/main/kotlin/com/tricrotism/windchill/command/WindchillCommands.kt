@@ -399,7 +399,7 @@ class WindchillCommands(private val plugin: Windchill) {
 
         audience.sendMessage(
             Rendering.body(
-                "Timing ${plugin.counterTargets().size} method(s) for ${window.coerceAtMost(plugin.settings.maxWindowSeconds)}s. " +
+                "Timing ${plugin.timingTargets().size} method(s) for ${window.coerceAtMost(plugin.settings.maxWindowSeconds)}s. " +
                     "JFR adds a little code to each while this runs and removes it after.",
             ),
         )
@@ -529,7 +529,7 @@ class WindchillCommands(private val plugin: Windchill) {
     }
 
     @Command("windchill agent")
-    @CommandDescription("Attach the optional agent, for exact attribution and invocation counts.")
+    @CommandDescription("Attach the optional agent, for exact class attribution.")
     @Permission(PERMISSION)
     fun agent(source: CommandSourceStack) {
         val audience = source.sender
@@ -538,7 +538,7 @@ class WindchillCommands(private val plugin: Windchill) {
             return
         }
 
-        val failure = plugin.attachAgent()
+        val failure = plugin.agent.attach()
         if (failure != null) {
             audience.sendMessage(Rendering.body("Could not attach: $failure"))
             return
@@ -548,94 +548,6 @@ class WindchillCommands(private val plugin: Windchill) {
         audience.sendMessage(
             Rendering.body("Attached. Class ownership is now read from live class loaders rather than jar scans."),
         )
-        if (plugin.agentCostsCacheSharing) {
-            audience.sendMessage(
-                Rendering.body(
-                    "This server is using an AOT cache. Attaching publishes to the bootstrap loader, " +
-                        "so the JVM now serves only boot classes from that cache. Restart without the " +
-                        "agent before trusting a startup measurement.",
-                ),
-            )
-        }
-    }
-
-    @Command("windchill count start")
-    @CommandDescription("Count invocations of the methods the last capture flagged.")
-    @Permission(PERMISSION)
-    fun countStart(source: CommandSourceStack) {
-        val audience = source.sender
-        if (!plugin.agent.attached) {
-            audience.sendMessage(Rendering.body("The agent is not attached. Run /windchill agent first."))
-            return
-        }
-
-        if (plugin.counterTargets().isEmpty()) {
-            audience.sendMessage(Rendering.body("No flagged methods to count. Run /windchill capture first."))
-            return
-        }
-        if (plugin.timer.running) {
-            audience.sendMessage(Rendering.body("A timing window is open. Counting would instrument the same methods twice."))
-            return
-        }
-
-        val instrumented = plugin.installCounters()
-        if (instrumented == 0) {
-            audience.sendMessage(Rendering.body("No classes could be instrumented. See the server log."))
-            return
-        }
-
-        audience.sendMessage(
-            Rendering.body(
-                "Counting ${plugin.countedMethods.size} method(s) across $instrumented class(es). " +
-                    "Run /windchill count to read them.",
-            ),
-        )
-        plugin.agent.transformFailures().forEach { audience.sendMessage(Rendering.bullet(it)) }
-    }
-
-    @Command("windchill count")
-    @CommandDescription("Read the invocation counts collected so far.")
-    @Permission(PERMISSION)
-    fun count(source: CommandSourceStack) {
-        val audience = source.sender
-        if (!plugin.agent.attached) {
-            audience.sendMessage(Rendering.body("The agent is not attached."))
-            return
-        }
-
-        // The installed list, not a fresh one. Slots were allocated when counting started, so a
-        // capture taken since would relabel every row onto the wrong method.
-        val targets = plugin.countedMethods
-        val counts = plugin.agent.counts()
-        if (targets.isEmpty() || counts.isEmpty()) {
-            audience.sendMessage(Rendering.body("Nothing is being counted. Run /windchill count start."))
-            return
-        }
-
-        audience.sendMessage(Rendering.heading("Invocation counts"))
-        targets.indices
-            .sortedByDescending { counts.getOrElse(it) { 0L } }
-            .forEach { slot ->
-                val calls = counts.getOrElse(slot) { 0L }
-                audience.sendMessage(
-                    Rendering.detail("  ${"%,d".format(calls)}", targets[slot].fullLabel),
-                )
-            }
-        audience.sendMessage(
-            Rendering.body(
-                "Divide the sampled share of a method by its call count to get per-call cost. " +
-                    "A large count with a small share is a cheap method called often, which is a " +
-                    "different problem from a slow one.",
-            ),
-        )
-    }
-
-    @Command("windchill count stop")
-    @CommandDescription("Stop counting and revert the instrumented classes.")
-    @Permission(PERMISSION)
-    fun countStop(source: CommandSourceStack) {
-        plugin.removeCounters()
-        source.sender.sendMessage(Rendering.body("Counting stopped and the original bytecode restored."))
     }
 
     @Command("windchill reload")

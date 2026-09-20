@@ -73,7 +73,6 @@ class Windchill : JavaPlugin() {
     private val index = AtomicReference<PluginIndex?>()
     private val findings = AtomicReference<List<Finding>>(emptyList())
     private val tuning = AtomicReference<List<TuningAdvice>>(emptyList())
-    private val counted = AtomicReference<List<MethodRef>>(emptyList())
     private val autoStop = AtomicReference<ScheduledTask?>()
     private val timingStop = AtomicReference<ScheduledTask?>()
     private val startupCapture = AtomicReference<ScheduledTask?>()
@@ -121,7 +120,7 @@ class Windchill : JavaPlugin() {
                     environment.effectiveCache,
                 )
             }
-            if (settings.agentEnabled) attachAgent()
+            if (settings.agentEnabled) agent.attach()
         }
 
         if (settings.startupCaptureEnabled) scheduleStartupCapture()
@@ -173,13 +172,12 @@ class Windchill : JavaPlugin() {
 
     override fun onDisable() {
         // Consumers before what they consume: the auto-stop can still close a window, the window can
-        // still be folding events, and the agent's transformer can still be installed on live classes.
+        // still be folding events, and a timing window can still have code injected into live classes.
         startupCapture.getAndSet(null)?.cancel()
         autoStop.getAndSet(null)?.cancel()
         timingStop.getAndSet(null)?.cancel()
         if (::recorder.isInitialized) recorder.shutdown()
         if (::timer.isInitialized) timer.shutdown()
-        if (::agent.isInitialized && agent.attached) removeCounters()
     }
 
     /**
@@ -321,9 +319,7 @@ class Windchill : JavaPlugin() {
         if (aot.environment.mode.training) {
             return "This server is an AOT training run. Timed classes would be left out of the cache it writes."
         }
-        if (countedMethods.isNotEmpty()) return "Invocation counting is active. Run /windchill count stop first."
-
-        val targets = counterTargets()
+        val targets = timingTargets()
         if (targets.isEmpty()) return "No flagged methods to time. Run /windchill capture first."
 
         timer.start(targets)?.let { return it }
@@ -368,63 +364,8 @@ class Windchill : JavaPlugin() {
         }
     }
 
-    /** Methods the last analysis flagged, and the candidates for counting. */
-    fun counterTargets(): List<MethodRef> =
-        lastFindings.mapNotNull { it.method }.distinct().take(settings.agentCounterTargets)
-
-    /**
-     * The methods currently instrumented, in the order their counter slots were allocated.
-     *
-     * Read this rather than recomputing [counterTargets] when labelling counts. The candidate list is
-     * derived from the last capture, so a capture taken between installing counters and reading them
-     * would shift every label onto the wrong method while the slots kept their original meaning.
-     */
-    val countedMethods: List<MethodRef>
-        get() = counted.get()
-
-    /**
-     * @return how many classes were instrumented, 0 when nothing could be
-     */
-    fun installCounters(): Int {
-        val targets = counterTargets()
-        if (targets.isEmpty()) return 0
-
-        val instrumented = agent.installCounters(targets.map { it.agentTarget })
-        counted.set(if (instrumented > 0) targets else emptyList())
-
-        return instrumented
-    }
-
-    fun removeCounters() {
-        agent.removeCounters()
-        counted.set(emptyList())
-    }
-
-    /**
-     * Attaches the agent, and says so when that costs the AOT cache.
-     *
-     * The agent publishes its counter class to the bootstrap loader, which is the only loader plugin
-     * classes reliably delegate to. The JVM responds by restricting cache sharing to boot classes for
-     * the rest of the run, so the two features work against each other in the same session. Measured
-     * on JDK 25, which prints "Sharing is only supported for boot loader classes" at that moment.
-     *
-     * @return null when attached, or why it could not be
-     */
-    fun attachAgent(): String? {
-        val failure = agent.attach()
-        if (failure == null && aot.environment.mode.consuming) {
-            slF4JLogger.warn(
-                "The agent attached while an AOT cache is in use. The JVM now serves only boot classes " +
-                    "from that cache, so anything loaded from here on is read from disk. Restart without " +
-                    "the agent before trusting a startup measurement.",
-            )
-        }
-
-        return failure
-    }
-
-    val agentCostsCacheSharing: Boolean
-        get() = agent.attached && aot.environment.mode.consuming
+    fun timingTargets(): List<MethodRef> =
+        lastFindings.mapNotNull { it.method }.distinct().take(settings.timingTargets)
 
     private fun registerCommands() {
         // Commands run on the coordinator's worker, not a tick thread. Every handler below opens or

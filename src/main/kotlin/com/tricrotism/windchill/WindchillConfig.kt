@@ -17,6 +17,7 @@ import org.bukkit.configuration.file.FileConfiguration
 data class WindchillConfig(
     val windowSeconds: Int,
     val maxWindowSeconds: Int,
+    val timingTargets: Int,
     val samplePeriodMillis: Int,
     val inlineDetailByDefault: Boolean,
     val startupCaptureEnabled: Boolean,
@@ -29,7 +30,6 @@ data class WindchillConfig(
     val maxFrameDepth: Int,
     val thresholds: Thresholds,
     val agentEnabled: Boolean,
-    val agentCounterTargets: Int,
     val aotAssembleTimeoutSeconds: Long,
     val bootHistoryRows: Int,
     val startupComparisonMinSamples: Int,
@@ -43,6 +43,7 @@ data class WindchillConfig(
         fun from(config: FileConfiguration): WindchillConfig = WindchillConfig(
             windowSeconds = config.requireInt("capture.window-seconds"),
             maxWindowSeconds = config.requireInt("capture.max-window-seconds"),
+            timingTargets = config.requireInt("capture.timing-targets"),
             samplePeriodMillis = config.requireInt("capture.sample-period-ms"),
             inlineDetailByDefault = config.requireBoolean("capture.inline-detail"),
             startupCaptureEnabled = config.requireBoolean("capture.on-startup.enabled"),
@@ -63,7 +64,6 @@ data class WindchillConfig(
                 maxFindingsPerRule = config.requireInt("thresholds.max-findings-per-rule"),
             ),
             agentEnabled = config.requireBoolean("agent.enabled"),
-            agentCounterTargets = config.requireInt("agent.counter-targets"),
             aotAssembleTimeoutSeconds = config.requireInt("aot.assemble-timeout-seconds").toLong(),
             bootHistoryRows = config.requireInt("aot.boot-history-rows"),
             startupComparisonMinSamples = config.requireInt("aot.startup-comparison-min-samples"),
